@@ -3,39 +3,45 @@
 
     Input: JSON containing a timestamp and list of bounding boxes for objects.
 
-    Object tracking is performed with only a short history. 
+    Object tracking is performed with only a short active history. 
     No momentum or long-term modelling is performed.
     Tracking Parameters:
-      * iou_threshold
-      * time_limit
-      * frame_limit
+      * iou_threshold   - scaler on matching sensitivity to location
+      * momentum_scale  - scaler on matching sensitivity to speed
+      * max_frames      - maximum number of frames to track an entity
+      * min_seconds     - minimum time in seconds to track a new entity
 
-    Output: log of objects tracked with a lifetime over live_time_limit threshold.
+    Output: log of objects tracked with a lifetime over min_seconds threshold.
 """
 
 import time as _time
+from datetime import datetime as _datetime
+import math as _math
 
 class ObjectTracker:
-    """ Manages identification and tracking of objects 
-        across multiple frames over time. """
-    history = []
-    temp_objects = []
-    object_log = []
+    """ Manages identification and tracking of objects
+        from a single view across multiple frames over time. """
     
-    ### Object matching parameter
+    def __init__(self):
+        self.active = []
+        self.object_log = []
 
-    iou_threshold = 0.8
+        ### Object matching parameters
+        self.iou_threshold = 0.8
+        self.momentum_scale = 1.0
 
-    ### Define recent history
-    time_limit = 5
-    frame_limit = 10
+        ### Environment Model # alternate matching at obstruction and view boundaries
+        self.activity_boundaries = []
+        self.obstructions = []
 
-    ### Minimum lifetime required for output logging
-    live_time_limit = 2
+        ### Define recent active history
+        self.max_frames = 150
+
+        ### Minimum lifetime required for output logging
+        self.min_seconds = 1
 
     def get_id(self):
-        taken = set([obj.id for frame in self.history for obj in frame.objects if obj.id is not None])
-        taken = taken.union(set([obj.id for obj in self.temp_objects if obj.id is not None]))
+        taken = set([obj.id for frame in self.active for obj in frame.objects if obj.id is not None])
         #print("taken ids: {}".format(','.join([str(name) for name in taken])))   
         for i in range(100,1000,100):
             #print("checking ids from {} to {}".format(i-100,i))
@@ -43,105 +49,17 @@ class ObjectTracker:
             free = list(new-taken)
             if len(free) > 0:
                 return free[0]
+            
+    def momentum_match(self,objA,objB):
+        """ Given two TrackedObjects, return Boolean match based on movement.
+            Default of lack of data is no match. """
+        if not (objA.speed and objB.speed):
+            return False
+        return abs( objA.speed - objB.speed ) < self.momentum_scale            
 
-
-    class Frame:
-        objects = None
-
-        @property
-        def new_objects(self):
-            return [obj for obj in self.objects if obj.new_observation]    
-
-        def __init__(self,frame_dict,tracker):
-            self.image_id  = frame_dict['image_id']
-            self.camera_id = frame_dict['camera_id']
-            self.id        = frame_dict['id']
-
-            self.timestamp = float(frame_dict['date_created'])
-            self.face_count = int(frame_dict['no_faces'])
-            self.objects = [tracker.TrackingObject(bbox,self.timestamp,tracker) for bbox in self._convert_to_frame_of_boxes(frame_dict['windows']) ]
-
-        def _convert_to_frame_of_boxes(self,array):
-            """ for any-lenth array or list, give a list of tuples where each tuple is length 4"""
-            #print("   input array {}".format(array))
-            if type(array) == str:
-                array = array.split(',')
-            if len(array) <4:
-                return []
-            output = []
-            unfinished = []
-            for item in array:
-                unfinished.append(int(item))
-                if len(unfinished) == 4:
-                    output.append(unfinished)
-                    unfinished = []
-            return output
-        
-        def __repr__(self):
-            report = "frame with {} objects".format(len(self.objects))
-            for obj in self.objects:
-                report += "\n    "+str(obj)
-            return report
-
-
-    class TrackingObject:
-        """ Class represents an object/face located in a Frame """
-        @property
-        def time_alive(self):
-            if self.end_time:
-                end = self.end_time
-            else:
-                end = _time.time()
-            return int(end - self.date_created)
-        
-        def __init__(self,coords,date_created,tracker):
-            self.coords = coords
-            self.id = tracker.get_id()
-            self.date_created = date_created
-            self.end_time = date_created
-            self.new_observation = True
-            tracker.temp_objects.append(self)
-
-        def observe(self,other_obj):
-            if other_obj.date_created < self.date_created:
-                self.new_observation = False
-                self.date_created = other_obj.date_created
-                self.id = other_obj.id
-            else:
-                other_obj.date_created = self.date_created
-                other_obj.id = self.id
-        
-        def __repr__(self):
-            report = "id: {} - coords: {}".format(self.id,','.join([str(x) for x in self.coords]))
-            report += "\n     lived {} secs ({} to {})\n".format(self.time_alive,self.date_created,self.end_time)
-            return report
-
-
-    class LogObject:
-        """ Class to format and serialize for output logging """
-        def __init__(self,trackingObject,frame):
-            self.latest_coords = trackingObject.coords
-            self.date_created = trackingObject.date_created
-            self.end_time = trackingObject.end_time
-            self.time_alive = trackingObject.time_alive
-
-            self.image_id  = frame.image_id
-            self.camera_id = frame.camera_id
-            self.id        = frame.id
-
-        def to_json(self):
-            return {'latest_coords': self.latest_coords, 'date_created':self.date_created,'end_time':self.end_time,
-                    'time_alive':self.time_alive, 'camera_id':self.camera_id}
-
-        def __repr__(self):
-            report = "\nlived {} secs ({} to {})\n".format(self.time_alive,self.date_created,self.end_time)
-            report += "  last seen at: {}\n".format(','.join([str(x) for x in self.latest_coords]))
-            return report
-
-
-    def object_match(self,objA,objB):
-        """ Given two TrackingObjects, return Boolean match """
-        # TODO add momentum estimates etc. for more sophisticated tracking
+    def location_match(self,objA,objB):
+        """ Given two TrackedObjects, return Boolean match based on location.
+            Default of lack of data is no match. """
         boxA = objA.coords
         boxB = objB.coords
         try:
@@ -165,65 +83,210 @@ class ObjectTracker:
         """ frameB is updated to match objects from frameA. """
         #print("comparing {} new objects with {} old objects".format(len(frameB.new_objects),len(frameA.objects)))
         no_matches = []
+        
+        # First pass using momentum factors
         for obja in frameA.objects:
             for objb in frameB.new_objects:
-                if self.object_match(obja,objb):
-                    #print("we have a match!")
+                if self.momentum_match(obja,objb):
+                    objb.observe(obja)
+        
+        # Second pass using location
+        for obja in frameA.objects:
+            for objb in frameB.new_objects:
+                if self.location_match(obja,objb):
                     objb.observe(obja)
         
         return frameB
 
 
-    def recent_history(self,new_frame):
-        return [frame for frame in self.history[-self.frame_limit:] if (new_frame.timestamp-frame.timestamp) < self.time_limit]
-
-
     def process_new_frame(self,new_frame):
-        """ History must be a list between length 0-5. new_frame must have 0 or more boxes in it.
-            Return new history and list of objects discovered from history analysis. """
+        """ new_frame must have 0 or more boxes in it.
+            Update active frames and list of objects present in new frame. """
         if new_frame.get("no_faces") == 0:
             return []
 
-        new_frame = self.Frame(new_frame,self)
+        new_frame = _Frame(new_frame,self)
 
-        for old_frame in self.recent_history(new_frame):
-            new_frame = self.frame_update(old_frame,new_frame)
+        for active_frame in self.active:
+            new_frame = self.frame_update(active_frame,new_frame)
             if len(new_frame.new_objects) == 0:
                 break
 
-        self.history.append(new_frame)
+        self.active.append(new_frame)
 
-        if len(self.history) > self.frame_limit:
-            retiring = self.history[-(self.frame_limit+1)]
-            self.log_objects(retiring,self.history[-self.frame_limit:])
-        
-        self.temp_objects = []
-        
-    def flush_final_frames(self):
-        N = len(self.history)
-        lim = min(len(self.history),self.frame_limit)
-        for i in range( N-lim , N-1 ):
-            self.log_objects(self.history[-i],self.history[-i+1:])
-        self.log_objects(self.history[-1])
+        if len(self.active) > self.max_frames:
+            retiring = self.active[:-(self.max_frames+1)]
+            self.active = self.active[-(self.max_frames+1):]
+            for frame in retiring:
+                self.log_objects(frame)
 
-    def log_objects(self,frame,exclude_frames=[]):
-        """ log objects which are not present in exclude_frames """
+    def close(self):
+        """ close out active frames and log their objects """
+        self.active.reverse()
+        while self.active:
+            _frame = self.active.pop()
+            self.log_objects(_frame)
+
+    def log_objects(self,frame):
+        """ log objects which are not present in active frames """
         obj_ids = [obj.id for obj in frame.objects]
-        exc_ids = [obj.id for _frame in exclude_frames for obj in _frame.objects]
+        exc_ids = [obj.id for _frame in self.active for obj in _frame.objects]
         new_object_ids = list(set(obj_ids) - set(exc_ids))
 
         for obj in frame.objects:
-            if obj.id in new_object_ids and obj.time_alive >= self.live_time_limit:
-                self.object_log.append(self.LogObject(obj,frame))
+            if obj.id in new_object_ids and obj.time_alive >= self.min_seconds:
+                self.object_log.append(obj)
+
+                
+class _Frame:
+    objects = None
+
+    @property
+    def new_objects(self):
+        return [obj for obj in self.objects if obj.new_observation]    
+
+    def __init__(self,frame_dict,tracker):
+        self.timestamp = float(frame_dict['date_created'])
+        self.face_count = int(frame_dict['no_faces'])
+        self.objects = [TrackedObject(bbox,self.timestamp,tracker.get_id()) for bbox in self._convert_to_frame_of_boxes(frame_dict['windows']) ]
+
+    def _convert_to_frame_of_boxes(self,array):
+        """ for any-lenth array or list, give a list of tuples where each tuple is length 4"""
+        #print("   input array {}".format(array))
+        if type(array) == str:
+            array = array.split(',')
+        if len(array) <4:
+            return []
+        output = []
+        unfinished = []
+        for item in array:
+            unfinished.append(int(item))
+            if len(unfinished) == 4:
+                output.append(unfinished)
+                unfinished = []
+        return output
+
+    def __repr__(self):
+        report = "frame with {} objects".format(len(self.objects))
+        for obj in self.objects:
+            report += "\n    "+str(obj)
+        return report
+
+class _Footprint:
+    @property
+    def isotimestamp(self):
+        return _datetime.utcfromtimestamp(self.timestamp).isoformat()
+    
+    def __init__(self,coords,timestamp):
+        self.coords=coords
+        self.timestamp=timestamp
+        
+    def __lt__(self,other):
+        return self.timestamp < other.timestamp
+    
+    def __gt__(self,other):
+        return self.timestamp > other.timestamp
+    
+    def __eq__(self,other):
+        return self.timestamp == other.timestamp and self.coords == other.coords
+    
+    def __ne__(self,other):
+        return self.timestamp != other.timestamp or self.coords != other.coords
+        
+    def __le__(self,other):
+        return self.timestamp <= other.timestamp
+    
+    def __ge__(self,other):
+        return self.timestamp >= other.timestamp
+        
+    def __cmp__(self,other):
+        return self.timestamp.__cmp__(other)
+    
+    def __repr__(self):
+        return f"{self.isotimestamp}" + " (" + ','.join([str(x) for x in self.coords]) + ")"
+
+class TrackedObject:
+    """ Class represents an object/face located in a Frame """
+    
+    @property
+    def date_created(self):
+        return self.tracks[0].timestamp
+    
+    @property
+    def end_time(self):
+        return self.tracks[-1].timestamp
+    
+    @property
+    def time_alive(self):
+        return int(self.end_time - self.date_created)
+
+    @property
+    def speed(self):
+        def centroid(coords):
+            y1,x1,y2,x2 = coords
+            return (y1+(y2-y1)/2 , x1+(x2-x1)/2)
+        
+        if self.end_time == self.date_created:
+            return None
+        if not self.coords:
+            return None
+        else:
+            start = self.tracks[0].coords
+            end = self.tracks[-1].coords
+            
+            t0 = self.tracks[0].timestamp
+            t1 = self.tracks[-1].timestamp
+            
+            return _math.sqrt( (end[0]-start[0])**2 + (end[1]-start[1])**2 ) / (t1-t0)
+
+    def __init__(self,coords,date_created,oid):
+        self.coords = coords
+        self.id = oid
+        self.new_observation = True
+        self.tracks = [_Footprint(coords,date_created)]
+        
+
+    def observe(self,other_obj):
+        """update this object with a previous observation.
+           equivalent to merge of the two objects.
+           do nothing if both have been merged already."""
+        if not self.new_observation and not other_obj.new_observation:
+            return
+        
+        if other_obj.date_created < self.date_created:
+            self.new_observation = False
+            self.id = other_obj.id
+        else:
+            other_obj.new_observation = False
+            other_obj.id = self.id
+            
+        tracks = other_obj.tracks + self.tracks
+        tracks.sort()
+        self.tracks = other_obj.tracks = tracks
+
+            
+    def __repr__(self):
+        report = "id: {} - coords: {}".format(self.id,','.join([str(x) for x in self.coords]))
+        report += "\n  lived {} secs ({} to {})".format(self.time_alive,self.date_created,self.end_time)
+        report += "\n  tracks: {}".format(self.tracks)
+        report += "\n"
+        return report
 
 
+    def __iter__(self):
+        yield ('latest_coords' , self.latest_coords)
+        yield ('date_created'  , self.date_created)
+        yield ('end_time'      , self.end_time)
+        yield ('time_alive'    , self.time_alive)
+
+    
 def track_objects(json_data):
     tracker = ObjectTracker()
 
     for frame in json_data:
         tracker.process_new_frame(frame)
 
-    tracker.flush_final_frames()
+    tracker.close()
 
     return tracker.object_log
 

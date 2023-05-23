@@ -9,8 +9,8 @@ Simple object tracking for computer vision.
 Object tracking based on parameterized identity decision:
 
   * IoU, Intersection-over-Union thresholding
-  * Time between object observation
-  * Frames between object observation
+  * Momentum or speed matching
+  * Time minimum between object observation
 
 ## Usage
 
@@ -27,5 +27,5 @@ Object tracking based on parameterized identity decision:
 
 ## Roadmap
 
-  1. momentum modelling
-  2. use object class information in identity function
+  1. parameterize fuzzier matching at boundaries or occlusion sites
+  3. use object class information in identity function
